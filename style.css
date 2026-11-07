@@ -1136,3 +1136,36 @@ body.kb-open .sheet-foot { padding-bottom: 10px; }
 .meal-edit .input { padding: 0 10px; }
 .meal-edit .input-time { width: 80px; padding: 0 4px; font-size: 16px; }
 .meal-edit .icon-btn { width: 40px; }
+
+/* ---------------------------------------------------------------- Analyse photo par IA */
+.quick-actions { grid-template-columns: repeat(4, 1fr); }
+.qa-btn { font-size: 12px; padding: 0 2px; text-align: center; line-height: 1.15; }
+.ai-preview {
+  margin-top: 6px; border-radius: var(--radius); background: var(--card); box-shadow: var(--shadow);
+  overflow: hidden; aspect-ratio: 4 / 3; display: grid; place-items: center;
+}
+.ai-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ai-preview.small { aspect-ratio: 16 / 9; }
+.ai-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--text-2); padding: 20px; text-align: center; font-size: 15px; }
+.ai-empty .ic { color: var(--accent); width: 40px; height: 40px; }
+.ai-note { min-height: 76px; padding: 10px 12px; resize: vertical; line-height: 1.35; display: block; }
+.ai-head { display: flex; gap: 12px; align-items: center; margin-top: 6px; }
+.ai-thumb { width: 64px; height: 64px; border-radius: 12px; overflow: hidden; flex: none; background: var(--fill); }
+.ai-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ai-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px 8px 4px; position: relative; min-height: 60px; }
+.food-list .ai-item + .ai-item::before { content: ""; position: absolute; top: 0; left: 48px; right: 0; height: 0.5px; background: var(--sep); }
+.ai-item.off .ai-item-main, .ai-item.off .ai-qty { opacity: 0.45; }
+.ai-check-wrap { width: 44px; height: 44px; display: grid; place-items: center; flex: none; cursor: pointer; }
+.ai-check { width: 22px; height: 22px; margin: 0; accent-color: var(--accent-bg); }
+.ai-item-main { flex: 1; min-width: 0; }
+.ai-item-name { font-size: 16px; line-height: 1.25; }
+.ai-item-meta { font-size: 13px; color: var(--text-2); margin-top: 2px; }
+.ai-qty { display: flex; align-items: center; gap: 4px; flex: none; color: var(--text-2); font-size: 14px; }
+.ai-qty .input { width: 72px; text-align: right; padding: 0 8px; }
+.ai-notes { margin: 2px 0 4px 18px; padding: 0; list-style: disc; color: var(--text); }
+.ai-notes li { margin-top: 4px; }
+.ai-model.active .li-title { color: var(--accent); font-weight: 600; }
+.badge-conf-low { background: rgba(250, 178, 25, 0.2); color: var(--warn-text); }
+.badge-conf-mid { background: var(--fill); color: var(--text-2); }
+.badge-conf-high { background: rgba(12, 163, 12, 0.14); color: var(--good-text); }
+.steps a { font-weight: 600; }

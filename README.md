@@ -16,6 +16,7 @@ tes données restent uniquement sur ton téléphone.
 - **Objectifs calculés** : métabolisme de base (Mifflin-St Jeor, ou Katch-McArdle si tu connais ta masse grasse), dépense totale, déficit selon ton rythme (0,5 / 0,75 / 1 % par semaine, plafonné à 25 % de ta dépense), protéines, lipides, glucides, fibres, eau. Détail de chaque calcul et modification manuelle possible.
 - **Journal du jour** : repas modifiables, calories restantes, barres protéines / glucides / lipides / fibres, eau, pas, pesée, jour d'entraînement, répartition des protéines.
 - **Ajout d'aliments** : 187 aliments courants (valeurs d'après la table Ciqual), récents (ajout en 2 touches), favoris, repas types, aliments perso, ajout rapide, **scan de code-barres** et recherche **Open Food Facts**.
+- **Photo IA (facultatif)** : prends ton assiette en photo, l'IA Claude estime les aliments, les quantités, les calories, les macros, les sucres et le sel, et te dit ce qu'il te restera dans la journée. Tu corriges avant d'ajouter. Nécessite ta propre clé API Anthropic (payant à l'usage, voir plus bas).
 - **Progrès** : moyenne 7 jours, perte par semaine, date estimée, graphiques poids / calories / protéines (7, 30, 90 jours), bilan de la semaine, mensurations.
 - **Coach adaptatif** : après 14 jours, estimation de ta vraie dépense, proposition d'objectif (jamais appliquée sans ton accord), détection de plateau et solutions (−150 kcal, plus de pas, pause diète).
 - **Sauvegarde** : export JSON via le menu Partager, import, export CSV, rappel hebdomadaire.
@@ -99,6 +100,41 @@ tes données restent uniquement sur ton téléphone.
 
 ---
 
+## Analyse photo par IA (facultatif)
+
+L'app peut estimer un repas à partir d'une photo grâce à **Claude**, l'IA d'Anthropic. C'est facultatif : sans clé, tout le reste fonctionne normalement.
+
+### Activer la fonction
+
+1. Va sur **https://platform.claude.com** et crée un compte (le site des développeurs d'Anthropic).
+2. Dans **Billing**, ajoute des crédits (par exemple 5 $).
+3. Dans **API Keys**, touche **Create Key** et copie la clé (elle commence par `sk-ant-`).
+4. Conseil : dans **Limits**, fixe une limite de dépense mensuelle.
+5. Dans l'app : **Réglages › Analyse photo par IA**, colle la clé, choisis le modèle, puis **Vérifier et enregistrer** (la vérification est gratuite).
+
+### Utilisation
+
+**＋ › Photo IA** › prends la photo (vue de dessus, assiette entière) › ajoute si tu veux des précisions (« 200 g de riz cuit », « cuit avec 1 c. à soupe d'huile ») › **Analyser**.
+L'IA affiche le plat, chaque aliment avec sa quantité estimée, le total (kcal, protéines, glucides, lipides, fibres, sucres, sel), la part de protéines, ce qu'il te restera dans la journée et un conseil pour la sèche. **Corrige les quantités**, décoche ce qui est faux, puis **Ajouter**.
+
+### Coût (facturé par Anthropic sur ta clé)
+
+| Réglage | Modèle | Coût estimé par photo | 5 $ de crédits ≈ |
+|---|---|---|---|
+| Précision maximale (par défaut) | Claude Opus 5.5 | ≈ 0,04 $ | 120 photos |
+| Équilibré | Claude Sonnet 5.5 | ≈ 0,02 $ | 250 photos |
+| Économique | Claude Haiku 5.5 | ≈ 0,001 $ | plusieurs milliers |
+
+Le coût réel de chaque analyse s'affiche sous le résultat. Tarifs Anthropic d'octobre 2026 : ils peuvent évoluer.
+
+### Confidentialité et limites
+
+- La clé est enregistrée **uniquement sur ton téléphone** : elle n'est ni dans le code publié sur GitHub, ni dans tes sauvegardes. Si tu perds ton téléphone, supprime-la sur platform.claude.com.
+- Pour chaque analyse, la photo (réduite), tes précisions et tes objectifs restants du jour sont envoyés à Anthropic.
+- C'est une **estimation** : l'IA reconnaît bien les aliments, mais les quantités, l'huile et les sauces restent approximatives. En sèche, pèse tes aliments quand c'est possible et utilise la photo pour les repas à l'extérieur.
+
+---
+
 ## Checklist de tests sur l'iPhone
 
 **Installation et affichage**
@@ -132,6 +168,13 @@ tes données restent uniquement sur ton téléphone.
 - [ ] Import de ce fichier (Réglages › Importer) → les données reviennent après confirmation.
 - [ ] Export CSV → le fichier s'ouvre dans Numbers (colonnes séparées, virgules décimales).
 
+**Photo IA (si tu as configuré une clé)**
+- [ ] Réglages › Analyse photo par IA : la clé est vérifiée et enregistrée ; une clé fausse affiche « Clé API invalide ».
+- [ ] ＋ › Photo IA › « Photo » ouvre l'appareil photo ; « Photothèque » ouvre tes photos.
+- [ ] L'analyse affiche le plat, les aliments, les quantités et le total en 10 à 40 secondes ; « Annuler l'analyse » fonctionne.
+- [ ] Modifier une quantité ou décocher un aliment met le total à jour ; « Ajouter » les place dans le bon repas.
+- [ ] En mode avion, un message clair indique qu'une connexion est nécessaire.
+
 **Progrès et coach**
 - [ ] Pesées sur plusieurs jours → moyenne 7 jours, graphique du poids ; toucher un graphique affiche les valeurs du jour.
 - [ ] Graphiques 7 / 30 / 90 jours ; « Voir les valeurs » affiche le tableau.
@@ -156,11 +199,12 @@ tes données restent uniquement sur ton téléphone.
 - **Non utilisés**, car indisponibles ou peu fiables dans une web app iPhone : notifications programmées, vibrations, Apple Santé.
 - **Scanner** : `BarcodeDetector` si Safari le propose, sinon la librairie [barcode-detector](https://github.com/Sec-ant/barcode-detector) (version figée, vérifiée par empreinte d'intégrité) chargée depuis jsDelivr à la première ouverture du scanner, puis gardée en cache.
 - **Open Food Facts** est un service gratuit et collaboratif : il peut être lent ou momentanément indisponible, et certaines fiches sont incomplètes.
+- **Photo IA** : modèle par défaut Claude Opus 5.5 (le plus précis), modifiable dans les Réglages. Réponse au format structuré (JSON imposé), réflexion adaptative en effort moyen. En cas de refus par les filtres de sécurité, l'API relance automatiquement sur un autre modèle (option « fallbacks » d'Anthropic, Opus et Sonnet). Le kit officiel d'Anthropic (`@anthropic-ai/sdk` 1.3.0) est chargé depuis jsDelivr à la première analyse. La photo est réduite à 1 280 px avant l'envoi.
 
 ## Données et confidentialité
 
 - Tout est enregistré dans le stockage local de l'app sur ton iPhone (rien sur un serveur, pas de compte).
-- Seules sorties réseau : les requêtes Open Food Facts (code-barres / nom de produit cherché) et le téléchargement unique du lecteur de codes-barres.
+- Seules sorties réseau : les requêtes Open Food Facts (code-barres / nom de produit cherché), le téléchargement unique du lecteur de codes-barres et, seulement si tu actives la Photo IA, l'envoi de la photo analysée à Anthropic.
 
 ## Crédits
 

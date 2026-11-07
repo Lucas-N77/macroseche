@@ -10,6 +10,7 @@
        3. Base d'aliments                 8. Onglet Progrès (graphiques, coach)
        4. Calculs nutritionnels           9. Onglets Aliments et Réglages
        5. Interface et onglet Journal    10. Sauvegarde, service worker, démarrage
+                                         11. Analyse photo par IA (Claude, facultatif)
    ============================================================================= */
 (function () {
   'use strict';
@@ -2066,7 +2067,7 @@
   function sourceLabel(food) {
     if (food.source === 'custom') return 'Aliment perso';
     if (food.source === 'off') return `Open Food Facts${food.brand ? ' · ' + food.brand : ''}${food.quantity ? ' · ' + food.quantity : ''}`;
-    if (food.source === 'entry') return 'Valeurs enregistrées dans ton journal';
+    if (food.source === 'entry') return food.brand === 'Estimation IA' ? 'Estimation par IA (photo)' : 'Valeurs enregistrées dans ton journal';
     return `${catInfo(food.cat).label} · valeurs moyennes (Ciqual)`;
   }
 
@@ -2099,6 +2100,7 @@
         </form>
       </div>
       <div class="quick-actions">
+        <button class="qa-btn" type="button" data-act="photo-ai">${icon('camera')}Photo IA</button>
         <button class="qa-btn" type="button" data-act="scan">${icon('barcode')}Scanner</button>
         <button class="qa-btn" type="button" data-act="quick">${icon('bolt')}Ajout rapide</button>
         <button class="qa-btn" type="button" data-act="create">${icon('plus')}Créer</button>
@@ -2171,6 +2173,8 @@
       } else if (act === 'tab') {
         st.tab = b.dataset.tab;
         renderResults();
+      } else if (act === 'photo-ai') {
+        openPhotoAI(itemOpts());
       } else if (act === 'scan') {
         openScanner(itemOpts());
       } else if (act === 'quick') {
@@ -3772,6 +3776,7 @@
     const anyManual = Object.keys(mg).some((k) => isNum(mg[k]));
     const plan = cyclingPlan(base);
     const act = activityOf(p.activity);
+    const aiCfg = loadAiConfig();
     return `
       <header class="topbar"><h1 class="topbar-title">Réglages</h1></header>
 
@@ -3845,6 +3850,12 @@
 
       <h2 class="section-title">Apparence</h2>
       <div class="seg" role="group" aria-label="Thème">${[['auto', 'Automatique'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button type="button" data-action="theme" data-v="${v}" class="${s.theme === v ? 'active' : ''}">${l}</button>`).join('')}</div>
+
+      <h2 class="section-title">Analyse photo par IA</h2>
+      <div class="list">
+        <button class="list-item" type="button" data-action="ai-setup"><span class="li-ico">${icon('sparkle')}</span><span class="li-main"><span class="li-title">${aiCfg.apiKey ? 'Activée' : 'Configurer l’analyse photo'}</span><span class="li-sub">${aiCfg.apiKey ? `${esc(AI_MODELS[aiCfg.model].name)} · ≈ ${fmtUsd(aiTypicalCost(aiCfg.model))} par photo` : 'Facultatif : avec ta clé API Anthropic (payant à l’usage)'}</span></span>${icon('chev-right', 'li-chev')}</button>
+      </div>
+      <p class="section-note">Prends ton repas en photo : l’IA estime les aliments, les quantités, les calories et les macros.</p>
 
       <h2 class="section-title">Sauvegarde</h2>
       <div class="list">
@@ -4025,6 +4036,575 @@
   }
 
   /* ===========================================================================
+     11. ANALYSE PHOTO PAR IA (Claude, d'Anthropic) — FACULTATIF
+     ---------------------------------------------------------------------------
+     - Fonctionne avec TA clé API Anthropic, saisie dans Réglages et gardée
+       uniquement sur ce téléphone (jamais dans le code, ni dans les sauvegardes).
+     - La photo (réduite) est envoyée à l'API Claude, qui estime chaque aliment,
+       sa quantité et ses valeurs pour 100 g. Tu corriges avant d'ajouter.
+     - Le kit officiel d'Anthropic (SDK JavaScript) est chargé seulement au
+       premier usage, depuis jsDelivr (version figée).
+     ========================================================================= */
+
+  const AI_STORAGE_KEY = 'macroseche:ia';                 // séparé des données : jamais exporté
+  const ANTHROPIC_SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@1.3.0/+esm';
+  const AI_CONSOLE_URL = 'https://platform.claude.com/settings/keys';
+  const AI_LIMITS_URL = 'https://platform.claude.com/settings/limits';
+  const AI_DEFAULT_MODEL = 'claude-opus-5-5';
+  /** Modèles proposés et tarifs en dollars par million de jetons (tarifs Anthropic, octobre 2026). */
+  const AI_MODELS = {
+    'claude-opus-5-5': { name: 'Claude Opus 5.5', label: 'Précision maximale', inPrice: 4, outPrice: 20, fallbacks: true },
+    'claude-sonnet-5-5': { name: 'Claude Sonnet 5.5', label: 'Équilibré', inPrice: 2, outPrice: 10, fallbacks: true },
+    'claude-haiku-5-5': { name: 'Claude Haiku 5.5', label: 'Économique', inPrice: 0.1, outPrice: 0.5, fallbacks: false },
+  };
+  const AI_IMAGE_MAX = 1280;                              // plus grand côté envoyé (px) : bon détail, coût réduit
+
+  /** Réponse attendue (format imposé à l'IA : « structured outputs »). */
+  const AI_SCHEMA = {
+    type: 'object',
+    properties: {
+      plat: { type: 'string', description: 'Nom court du repas, ex. « Poulet, riz et brocolis »' },
+      aliments: {
+        type: 'array',
+        description: 'Un élément par aliment, sauce ou matière grasse visible ou probable',
+        items: {
+          type: 'object',
+          properties: {
+            nom: { type: 'string', description: 'Nom en français précisant cru ou cuit, ex. « Riz blanc, cuit »' },
+            quantite: { type: 'number', description: 'Quantité estimée en grammes (ou en ml pour une boisson)' },
+            unite: { type: 'string', enum: ['g', 'ml'] },
+            kcal_100: { type: 'number', description: 'kcal pour 100 g ou 100 ml' },
+            proteines_100: { type: 'number', description: 'g de protéines pour 100 g' },
+            glucides_100: { type: 'number', description: 'g de glucides pour 100 g' },
+            lipides_100: { type: 'number', description: 'g de lipides pour 100 g' },
+            fibres_100: { type: 'number', description: 'g de fibres pour 100 g' },
+            sucres_100: { type: 'number', description: 'g de sucres pour 100 g' },
+            sel_100: { type: 'number', description: 'g de sel pour 100 g' },
+            confiance: { type: 'string', enum: ['faible', 'moyenne', 'elevee'] },
+          },
+          required: ['nom', 'quantite', 'unite', 'kcal_100', 'proteines_100', 'glucides_100', 'lipides_100', 'fibres_100', 'sucres_100', 'sel_100', 'confiance'],
+          additionalProperties: false,
+        },
+      },
+      hypotheses: { type: 'array', items: { type: 'string' }, description: 'Suppositions faites (huile de cuisson, sauce, taille de portion…)' },
+      conseil_seche: { type: 'string', description: 'Une ou deux phrases de conseil concret pour la sèche' },
+      confiance_globale: { type: 'string', enum: ['faible', 'moyenne', 'elevee'] },
+    },
+    required: ['plat', 'aliments', 'hypotheses', 'conseil_seche', 'confiance_globale'],
+    additionalProperties: false,
+  };
+
+  const AI_SYSTEM = [
+    'Tu es un nutritionniste expert de la sèche (perte de gras en gardant le muscle).',
+    'On t’envoie la photo d’un repas, d’un aliment ou d’une étiquette nutritionnelle.',
+    '- Identifie chaque aliment visible et estime sa quantité en grammes (ml pour les boissons) grâce aux repères visuels : taille de l’assiette (souvent 24 à 27 cm), couverts, main, emballage.',
+    '- Donne pour chaque aliment des valeurs pour 100 g (ou 100 ml) réalistes, cohérentes avec la table Ciqual de l’ANSES, en précisant cru ou cuit dans le nom.',
+    '- Compte les matières grasses de cuisson, sauces et assaisonnements probables, si possible comme éléments séparés, et mentionne-les dans les hypothèses.',
+    '- Si une étiquette nutritionnelle est lisible, utilise ses valeurs. Les précisions de l’utilisateur priment sur ton estimation visuelle.',
+    '- Si la photo ne montre pas de nourriture, renvoie une liste d’aliments vide et explique pourquoi dans les hypothèses.',
+    '- conseil_seche : une ou deux phrases concrètes pour la sèche (protéines, densité calorique, ajustement possible), en tenant compte des objectifs restants s’ils sont fournis.',
+    'Réponds en français.',
+  ].join('\n');
+
+  function loadAiConfig() {
+    try {
+      const c = JSON.parse(localStorage.getItem(AI_STORAGE_KEY) || '{}');
+      return { apiKey: typeof c.apiKey === 'string' ? c.apiKey : '', model: AI_MODELS[c.model] ? c.model : AI_DEFAULT_MODEL };
+    } catch (e) {
+      return { apiKey: '', model: AI_DEFAULT_MODEL };
+    }
+  }
+  function saveAiConfig(c) {
+    try {
+      if (!c.apiKey && c.model === AI_DEFAULT_MODEL) localStorage.removeItem(AI_STORAGE_KEY);
+      else localStorage.setItem(AI_STORAGE_KEY, JSON.stringify({ apiKey: c.apiKey, model: c.model }));
+      return true;
+    } catch (e) {
+      toast('Impossible d’enregistrer la clé sur ce téléphone', { error: true });
+      return false;
+    }
+  }
+  function fmtUsd(v) { return isNum(v) ? `${fmt(v, v < 0.01 ? 3 : 2)} $` : '–'; }
+  /** Coût estimé d'une photo typique (~2 700 jetons envoyés, ~1 500 reçus avec la réflexion). */
+  function aiTypicalCost(id) { const m = AI_MODELS[id]; return (2700 * m.inPrice + 1500 * m.outPrice) / 1e6; }
+  function aiUsageCost(id, usage) {
+    const m = AI_MODELS[id];
+    if (!m || !usage) return null;
+    const input = (usage.input_tokens || 0) + 1.25 * (usage.cache_creation_input_tokens || 0) + 0.1 * (usage.cache_read_input_tokens || 0);
+    return (input * m.inPrice + (usage.output_tokens || 0) * m.outPrice) / 1e6;
+  }
+  function maskKey(k) { return k ? `${k.slice(0, 10)}…${k.slice(-4)}` : ''; }
+
+  let sdkPromise = null;
+  /** Charge le kit officiel d'Anthropic (une seule fois, puis gardé en cache par le service worker). */
+  function loadAnthropicSdk() {
+    if (!sdkPromise) {
+      sdkPromise = import(ANTHROPIC_SDK_URL).then((m) => m.default).catch((err) => {
+        sdkPromise = null;
+        throw err;
+      });
+    }
+    return sdkPromise;
+  }
+  async function aiClient(apiKey) {
+    const Anthropic = await loadAnthropicSdk();
+    // dangerouslyAllowBrowser : appel direct depuis le téléphone avec TA clé (pas de serveur intermédiaire).
+    return { Anthropic, client: new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 2, timeout: 120000 }) };
+  }
+
+  /** Traduit les erreurs de l'API en messages clairs (de la plus précise à la plus générale). */
+  function aiErrorInfo(err, Anthropic) {
+    const A = Anthropic || {};
+    const is = (name) => typeof A[name] === 'function' && err instanceof A[name];
+    if (is('APIUserAbortError')) return { aborted: true };
+    if (is('AuthenticationError')) return { key: true, text: 'Clé API invalide ou révoquée. Vérifie-la dans Réglages › Analyse photo par IA.' };
+    if (is('PermissionDeniedError')) return { key: true, text: 'Ta clé n’a pas accès à ce service. Vérifie ton compte sur platform.claude.com.' };
+    if (is('NotFoundError')) return { model: true, text: 'Ce modèle n’est pas disponible pour ton compte : choisis-en un autre dans Réglages.' };
+    if (is('RateLimitError')) return { retry: true, text: 'Trop de demandes d’affilée : attends une minute puis réessaie.' };
+    if (is('BadRequestError')) return { text: 'La demande a été refusée (photo trop grande ou format non pris en charge). Essaie une autre photo.' };
+    if (is('InternalServerError')) return { retry: true, text: 'Le service d’IA est momentanément surchargé. Réessaie dans un instant.' };
+    if (is('APIConnectionTimeoutError')) return { retry: true, text: 'L’analyse a pris trop de temps. Réessaie (une connexion Wi-Fi aide).' };
+    if (is('APIConnectionError')) return { retry: true, text: 'Connexion impossible : vérifie ta connexion Internet.' };
+    if (is('APIError') && (err.status === 402 || err.type === 'billing_error')) return { key: true, text: 'Problème de facturation : ajoute des crédits sur platform.claude.com (Billing).' };
+    if (is('APIError')) return { retry: true, text: `Erreur du service d’IA (${err.status || 'inconnue'}). Réessaie plus tard.` };
+    if (navigator.onLine === false) return { retry: true, text: 'Hors ligne : l’analyse photo nécessite une connexion Internet.' };
+    return { retry: true, text: 'Le module d’IA n’a pas pu se charger. Vérifie ta connexion puis réessaie.' };
+  }
+
+  /** Réduit la photo (plus grand côté 1 280 px) et la convertit en JPEG base64. */
+  function prepareImage(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const w0 = img.naturalWidth;
+          const h0 = img.naturalHeight;
+          const scale = Math.min(1, AI_IMAGE_MAX / Math.max(w0, h0));
+          const w = Math.max(1, Math.round(w0 * scale));
+          const h = Math.max(1, Math.round(h0 * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+          URL.revokeObjectURL(url);
+          resolve({ dataUrl, base64: dataUrl.slice(dataUrl.indexOf(',') + 1), width: w, height: h });
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          reject(err);
+        }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image illisible')); };
+      img.src = url;
+    });
+  }
+
+  /** Vérifie et nettoie la réponse de l'IA (valeurs négatives, quantités absurdes…). */
+  function cleanAiResult(raw) {
+    const num = (v, max) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(n, max) : 0; };
+    const conf = (c) => (['faible', 'moyenne', 'elevee'].indexOf(c) >= 0 ? c : 'moyenne');
+    const items = (Array.isArray(raw && raw.aliments) ? raw.aliments : []).slice(0, 20).filter(isObj).map((a) => ({
+      name: String(a.nom || 'Aliment').trim().slice(0, 80) || 'Aliment',
+      qty: Math.round(num(a.quantite, 3000)),
+      unit: a.unite === 'ml' ? 'ml' : 'g',
+      per100: { kcal: num(a.kcal_100, 950), prot: num(a.proteines_100, 100), gluc: num(a.glucides_100, 100), lip: num(a.lipides_100, 100), fib: num(a.fibres_100, 100) },
+      sugars: num(a.sucres_100, 100),
+      salt: num(a.sel_100, 100),
+      conf: conf(a.confiance),
+      on: true,
+    })).filter((x) => x.qty > 0);
+    return {
+      dish: String((raw && raw.plat) || 'Repas').trim().slice(0, 80) || 'Repas',
+      items,
+      notes: (Array.isArray(raw && raw.hypotheses) ? raw.hypotheses : []).map((x) => String(x).trim()).filter(Boolean).slice(0, 8),
+      advice: String((raw && raw.conseil_seche) || '').trim().slice(0, 500),
+      conf: conf(raw && raw.confiance_globale),
+    };
+  }
+
+  /** Envoie la photo à Claude et renvoie le résultat nettoyé. */
+  async function analyzeMealPhoto(cfg, image, context, signal) {
+    let Anthropic;
+    let client;
+    try {
+      ({ Anthropic, client } = await aiClient(cfg.apiKey));
+    } catch (err) {
+      throw Object.assign(new Error('ai'), { info: aiErrorInfo(err, null) });
+    }
+    const model = AI_MODELS[cfg.model] ? cfg.model : AI_DEFAULT_MODEL;
+    const lines = ['Analyse ce repas.', `Repas : ${context.mealName}.`];
+    if (context.note) lines.push(`Précisions de l’utilisateur : ${context.note}`);
+    if (context.remaining) lines.push(`Objectifs restants aujourd’hui avant ce repas : ${context.remaining}.`);
+    const body = {
+      model,
+      max_tokens: 16000,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'medium', format: { type: 'json_schema', schema: AI_SCHEMA } },
+      system: AI_SYSTEM,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: image.base64 } },
+          { type: 'text', text: lines.join('\n') },
+        ],
+      }],
+    };
+    let response;
+    try {
+      if (AI_MODELS[model].fallbacks) {
+        // En cas de refus par les filtres de sécurité, l'API relance automatiquement sur un autre modèle.
+        response = await client.beta.messages.create(Object.assign({ betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }, body), { signal });
+      } else {
+        response = await client.messages.create(body, { signal });
+      }
+    } catch (err) {
+      throw Object.assign(new Error('ai'), { info: aiErrorInfo(err, Anthropic) });
+    }
+    if (response.stop_reason === 'refusal') throw Object.assign(new Error('ai'), { info: { text: 'L’IA a refusé d’analyser cette photo. Essaie une autre photo ou utilise l’ajout rapide.' } });
+    if (response.stop_reason === 'max_tokens') throw Object.assign(new Error('ai'), { info: { retry: true, text: 'Réponse incomplète. Réessaie.' } });
+    const textBlock = response.content.find((b) => b.type === 'text');
+    let parsed;
+    try {
+      parsed = JSON.parse(textBlock ? textBlock.text : '');
+    } catch (e) {
+      throw Object.assign(new Error('ai'), { info: { retry: true, text: 'Réponse illisible. Réessaie.' } });
+    }
+    return Object.assign(cleanAiResult(parsed), { usage: response.usage, model: response.model || model });
+  }
+
+  /* ---------- Réglages : clé API et modèle ---------- */
+  function openAiSetup(onDone) {
+    const cfg = loadAiConfig();
+    let model = cfg.model;
+    const sheet = openSheet({ title: 'Analyse photo par IA', closeLabel: 'Fermer' });
+    const modelRows = () => Object.keys(AI_MODELS).map((id) => `
+      <button type="button" class="list-item ai-model ${model === id ? 'active' : ''}" data-model="${id}" aria-pressed="${model === id}">
+        <span class="li-main"><span class="li-title">${esc(AI_MODELS[id].label)}</span><span class="li-sub">${esc(AI_MODELS[id].name)} · ≈ ${fmtUsd(aiTypicalCost(id))} par photo</span></span>
+        ${model === id ? icon('check', 'accent') : ''}
+      </button>`).join('');
+    sheet.setBody(`
+      <p class="section-note" style="margin-top:4px">Prends ton assiette en photo : l’IA Claude (Anthropic) estime les aliments, les quantités, les calories et les macros. Tu vérifies et corriges avant d’ajouter.</p>
+      <h3 class="section-title">1. Ta clé API Anthropic</h3>
+      <div class="form-list">
+        <div class="field field-col">
+          <input class="input" type="password" name="key" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="sk-ant-…" value="${esc(cfg.apiKey)}" aria-label="Clé API Anthropic">
+          <span class="field-hint">${cfg.apiKey ? `Clé enregistrée : ${esc(maskKey(cfg.apiKey))}` : 'Aucune clé enregistrée.'}</span>
+        </div>
+      </div>
+      <ol class="steps" style="margin-top:12px">
+        <li><span>Crée un compte sur <a href="${AI_CONSOLE_URL}" target="_blank" rel="noopener">platform.claude.com</a> (le site des développeurs d’Anthropic).</span></li>
+        <li><span>Dans <b>Billing</b>, ajoute des crédits : 5 $ ≈ 120 photos en précision maximale, ≈ 250 en équilibré, plusieurs milliers en économique.</span></li>
+        <li><span>Dans <b>API Keys</b>, touche <b>Create Key</b>, copie la clé (elle commence par « sk-ant- ») et colle-la ci-dessus.</span></li>
+        <li><span>Conseil : fixe une limite de dépense mensuelle dans <a href="${AI_LIMITS_URL}" target="_blank" rel="noopener">Limits</a>.</span></li>
+      </ol>
+      <h3 class="section-title">2. Modèle</h3>
+      <div class="list" data-role="models">${modelRows()}</div>
+      <p class="section-note">Le coût est facturé par Anthropic sur ta clé, à chaque photo analysée. Le coût réel s’affiche après chaque analyse.</p>
+      ${banner('info', 'info', 'Confidentialité', 'La clé reste uniquement sur ce téléphone : elle n’est ni dans le code publié, ni dans tes sauvegardes. La photo réduite, tes précisions et tes objectifs restants du jour sont envoyés à Anthropic pour l’analyse. Si tu perds ton téléphone, supprime la clé sur platform.claude.com.')}
+      <div class="field-error" data-role="err" hidden></div>`);
+    sheet.setFoot(`<div class="btn-row">${cfg.apiKey ? '<button class="btn btn-danger" type="button" data-act="remove" style="flex:0 0 auto">Supprimer</button>' : ''}<button class="btn btn-primary" type="button" data-act="save">Vérifier et enregistrer</button></div>`);
+    const errBox = $('[data-role="err"]', sheet.body);
+    sheet.el.addEventListener('click', async (ev) => {
+      const m = ev.target.closest('[data-model]');
+      if (m) {
+        model = m.dataset.model;
+        $('[data-role="models"]', sheet.body).innerHTML = modelRows();
+        return;
+      }
+      const b = ev.target.closest('[data-act]');
+      if (!b || b.disabled) return;
+      if (b.dataset.act === 'remove') {
+        const ok = await confirmDialog({ title: 'Supprimer la clé API ?', message: 'L’analyse photo sera désactivée sur ce téléphone.', ok: 'Supprimer', danger: true });
+        if (!ok) return;
+        saveAiConfig({ apiKey: '', model });
+        sheet.close();
+        render();
+        toast('Clé supprimée');
+        return;
+      }
+      if (b.dataset.act !== 'save') return;
+      const key = $('[name="key"]', sheet.body).value.trim();
+      errBox.hidden = true;
+      if (!key) {
+        if (cfg.apiKey === '' && model !== cfg.model) { saveAiConfig({ apiKey: '', model }); sheet.close(); return; }
+        errBox.textContent = 'Colle ta clé API (elle commence par « sk-ant- »).';
+        errBox.hidden = false;
+        return;
+      }
+      if (!/^sk-ant-[A-Za-z0-9_-]{10,}$/.test(key)) {
+        errBox.textContent = 'Cette clé ne ressemble pas à une clé Anthropic (« sk-ant-… »). Vérifie le copier-coller.';
+        errBox.hidden = false;
+        return;
+      }
+      b.disabled = true;
+      b.innerHTML = '<span class="spinner"></span> Vérification…';
+      let Anthropic = null;
+      try {
+        const c = await aiClient(key);
+        Anthropic = c.Anthropic;
+        await c.client.models.retrieve(model);   // vérifie la clé et l'accès au modèle, sans consommer de crédits
+        saveAiConfig({ apiKey: key, model });
+        sheet.close();
+        render();
+        toast('Clé vérifiée et enregistrée ✓');
+        if (typeof onDone === 'function') onDone();
+      } catch (err) {
+        const info = aiErrorInfo(err, Anthropic);
+        errBox.textContent = info.text || 'Vérification impossible.';
+        errBox.hidden = false;
+        b.disabled = false;
+        b.textContent = 'Vérifier et enregistrer';
+      }
+    });
+  }
+  ACTIONS['ai-setup'] = () => openAiSetup();
+
+  /* ---------- Feuille « Photo IA » ---------- */
+  function openPhotoAI(o) {
+    const opts = o || {};
+    const cfg = loadAiConfig();
+    if (!cfg.apiKey) {
+      openAiSetup(() => openPhotoAI(opts));
+      return;
+    }
+    const st = { meal: opts.meal || guessMeal(), image: null, note: '', phase: 'pick', result: null, error: null, ctrl: null };
+    const sheet = openSheet({
+      title: 'Photo IA',
+      full: true,
+      closeLabel: 'Annuler',
+      onClose: () => { if (st.ctrl) st.ctrl.abort(); },
+    });
+
+    function remainingText() {
+      const g = dayGoals(ui.day);
+      const t = dayTotals(ui.day);
+      return `${fmt(Math.max(0, g.kcal - t.kcal))} kcal, ${fmt(Math.max(0, g.prot - t.prot))} g de protéines, ${fmt(Math.max(0, g.gluc - t.gluc))} g de glucides, ${fmt(Math.max(0, g.lip - t.lip))} g de lipides`;
+    }
+
+    function pickHTML() {
+      return `
+        <input class="sr-only" type="file" accept="image/*" capture="environment" data-role="cam" tabindex="-1" aria-hidden="true">
+        <input class="sr-only" type="file" accept="image/*" data-role="lib" tabindex="-1" aria-hidden="true">
+        <div class="ai-preview ${st.image ? 'has-img' : ''}">
+          ${st.image ? `<img src="${st.image.dataUrl}" alt="Photo du repas">` : `<div class="ai-empty">${icon('camera', 'ic-l')}<span>Prends ton repas en photo, vu de dessus et en entier</span></div>`}
+        </div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn ${st.image ? '' : 'btn-primary'}" type="button" data-act="cam">${icon('camera')} ${st.image ? 'Reprendre' : 'Photo'}</button>
+          <button class="btn" type="button" data-act="lib">Photothèque</button>
+        </div>
+        <h3 class="section-title">Précisions (facultatif)</h3>
+        <textarea class="input ai-note" rows="2" maxlength="300" data-role="note" placeholder="ex. : 200 g de riz cuit, cuisson avec 1 c. à soupe d’huile">${esc(st.note)}</textarea>
+        <p class="field-hint">Les quantités que tu connais rendent l’estimation bien plus fiable.</p>
+        <h3 class="section-title">Repas</h3>
+        <div class="chips">${mealChips(st.meal)}</div>
+        ${st.error ? banner(st.error.retry ? 'warn' : 'bad', 'info', 'Analyse impossible', st.error.text, st.error.key ? '<button class="btn btn-small btn-primary" type="button" data-act="setup">Modifier la clé</button>' : (st.error.model ? '<button class="btn btn-small btn-primary" type="button" data-act="setup">Changer de modèle</button>' : '')) : ''}
+        <p class="field-hint center" style="margin-top:14px">${esc(AI_MODELS[cfg.model].name)} · ≈ ${fmtUsd(aiTypicalCost(cfg.model))} par photo · <button class="link-btn" type="button" data-act="setup" style="min-height:auto">Réglages</button></p>`;
+    }
+
+    function loadingHTML() {
+      return `
+        <div class="ai-preview has-img">${st.image ? `<img src="${st.image.dataUrl}" alt="Photo du repas">` : ''}</div>
+        <div class="empty"><span class="spinner"></span><div class="empty-title" style="margin-top:10px">Analyse en cours…</div><div>L’IA identifie les aliments et estime les quantités (10 à 40 secondes).</div></div>`;
+    }
+
+    function itemsTotal() {
+      return sumNutri(st.result.items.filter((it) => it.on && it.qty > 0).map((it) => ({ n: scaleNutri(it.per100, it.qty) })));
+    }
+
+    function confBadge(c) {
+      const map = { faible: ['Confiance faible', 'badge-conf-low'], moyenne: ['Confiance moyenne', 'badge-conf-mid'], elevee: ['Confiance élevée', 'badge-conf-high'] };
+      const x = map[c] || map.moyenne;
+      return `<span class="badge ${x[1]}">${x[0]}</span>`;
+    }
+
+    function totalsHTML() {
+      const n = itemsTotal();
+      const g = dayGoals(ui.day);
+      const before = dayTotals(ui.day);
+      const leftKcal = g.kcal - before.kcal - n.kcal;
+      const leftProt = g.prot - before.prot - n.prot;
+      const protShare = n.kcal > 0 ? (n.prot * 4) / n.kcal * 100 : 0;
+      const shareTxt = protShare >= 30 ? 'excellent pour la sèche' : protShare >= 20 ? 'correct' : 'faible : ajoute une source de protéines';
+      const sugars = sum(st.result.items.filter((it) => it.on).map((it) => it.sugars * it.qty / 100));
+      const salt = sum(st.result.items.filter((it) => it.on).map((it) => it.salt * it.qty / 100));
+      return `
+        <div class="nutri-kcal">${fmt(n.kcal)} <small>kcal</small></div>
+        <div class="nutri-grid">${MACROS.map((m) => `<div class="ncell"><i class="dot bg-${m.key}"></i>${m.label}<b>${fmtG(n[m.key])} g</b></div>`).join('')}</div>
+        <div class="calc-lines">
+          <div>Sucres <b>${fmtG(sugars)} g</b> · Sel <b>${fmt(salt, 1)} g</b></div>
+          <div>Protéines : <b>${fmt(protShare)} % des calories</b> (${shareTxt})</div>
+          <div>${leftKcal >= 0
+            ? `Après ce repas, il te restera <b>${fmt(leftKcal)} kcal</b> et <b>${fmt(Math.max(0, leftProt))} g de protéines</b> pour la journée.`
+            : `Ce repas te fait dépasser ton objectif du jour de <b>${fmt(-leftKcal)} kcal</b>.`}</div>
+        </div>`;
+    }
+
+    function itemRowHTML(it, i) {
+      const n = scaleNutri(it.per100, it.qty);
+      return `
+        <div class="ai-item ${it.on ? '' : 'off'}" data-i="${i}">
+          <label class="ai-check-wrap"><input class="ai-check" type="checkbox" ${it.on ? 'checked' : ''} data-role="on" aria-label="Inclure ${esc(it.name)}"></label>
+          <div class="ai-item-main">
+            <div class="ai-item-name">${esc(it.name)}</div>
+            <div class="ai-item-meta" data-role="meta">${fmt(n.kcal)} kcal · P ${fmtG(n.prot)} · G ${fmtG(n.gluc)} · L ${fmtG(n.lip)}${it.conf === 'faible' ? ' · <span class="warn">à vérifier</span>' : ''}</div>
+          </div>
+          <label class="ai-qty"><input class="input" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" value="${fmtInput(it.qty, 0)}" data-role="qty" aria-label="Quantité de ${esc(it.name)}"><span>${it.unit}</span></label>
+        </div>`;
+    }
+
+    function resultHTML() {
+      const r = st.result;
+      const cost = aiUsageCost(r.model && AI_MODELS[r.model] ? r.model : cfg.model, r.usage);
+      if (!r.items.length) {
+        return `
+          <div class="ai-preview has-img small">${st.image ? `<img src="${st.image.dataUrl}" alt="Photo du repas">` : ''}</div>
+          ${banner('warn', 'info', 'Aucun aliment reconnu', r.notes.join(' ') || 'L’IA n’a pas trouvé de nourriture sur cette photo.')}
+          <div class="btn-row" style="margin-top:12px"><button class="btn btn-primary" type="button" data-act="again">Reprendre une photo</button></div>`;
+      }
+      return `
+        <div class="ai-head">
+          <div class="ai-thumb">${st.image ? `<img src="${st.image.dataUrl}" alt="">` : ''}</div>
+          <div class="grow"><div class="qty-name">${esc(r.dish)}</div><div style="margin-top:4px">${confBadge(r.conf)}</div></div>
+        </div>
+        <div class="nutri" data-role="totals">${totalsHTML()}</div>
+        ${r.advice ? `<div class="banner banner-good">${icon('coach')}<div class="banner-body"><div class="banner-title">Conseil sèche</div><p>${esc(r.advice)}</p></div></div>` : ''}
+        <h3 class="section-title">Aliments détectés (corrige les quantités)</h3>
+        <div class="food-list" data-role="items">${r.items.map(itemRowHTML).join('')}</div>
+        ${r.notes.length ? `<details class="per100" open><summary>Hypothèses de l’IA</summary><ul class="ai-notes">${r.notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></details>` : ''}
+        <h3 class="section-title">Repas</h3>
+        <div class="chips">${mealChips(st.meal)}</div>
+        <p class="field-hint center" style="margin-top:12px">Estimation par IA : vérifie les quantités, surtout l’huile et les sauces.${isNum(cost) ? ` Coût de cette analyse ≈ ${fmtUsd(cost)}.` : ''}</p>`;
+    }
+
+    function draw() {
+      if (st.phase === 'loading') {
+        sheet.setBody(loadingHTML());
+        sheet.setFoot('<button class="btn btn-block" type="button" data-act="cancel">Annuler l’analyse</button>');
+      } else if (st.phase === 'result') {
+        sheet.setBody(resultHTML());
+        const count = st.result.items.filter((it) => it.on && it.qty > 0).length;
+        sheet.setFoot(st.result.items.length
+          ? `<div class="btn-row"><button class="btn" type="button" data-act="again" style="flex:0 0 auto">${icon('camera')}</button><button class="btn btn-primary" type="button" data-act="add" ${count ? '' : 'disabled'}>Ajouter ${count} aliment${count > 1 ? 's' : ''}</button></div>`
+          : '');
+      } else {
+        sheet.setBody(pickHTML());
+        sheet.setFoot(`<button class="btn btn-primary btn-block" type="button" data-act="analyze" ${st.image ? '' : 'disabled'}>${icon('sparkle')} Analyser la photo</button>`);
+      }
+    }
+
+    async function onFile(input) {
+      const file = input.files && input.files[0];
+      input.value = '';
+      if (!file) return;
+      try {
+        st.image = await prepareImage(file);
+        st.error = null;
+      } catch (e) {
+        st.error = { text: 'Impossible de lire cette image. Essaie une autre photo (JPEG ou PNG).' };
+      }
+      draw();
+    }
+
+    async function analyze() {
+      if (!st.image) return;
+      const noteEl = $('[data-role="note"]', sheet.body);
+      if (noteEl) st.note = noteEl.value.trim();
+      st.phase = 'loading';
+      st.error = null;
+      st.ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      draw();
+      try {
+        st.result = await analyzeMealPhoto(cfg, st.image, { mealName: mealName(st.meal), note: st.note, remaining: remainingText() }, st.ctrl ? st.ctrl.signal : undefined);
+        st.phase = 'result';
+      } catch (err) {
+        const info = (err && err.info) || { retry: true, text: 'Analyse impossible. Réessaie.' };
+        st.phase = 'pick';
+        st.error = info.aborted ? null : info;
+      }
+      st.ctrl = null;
+      if (!sheet.closed) draw();
+    }
+
+    function addToJournal() {
+      const key = ui.day;
+      const chosen = st.result.items.filter((it) => it.on && it.qty > 0);
+      if (!chosen.length) return;
+      const day = getDay(key, true);
+      const now = Date.now();
+      const entries = chosen.map((it, i) => ({
+        id: uid('e'), meal: st.meal, ref: null, name: it.name, brand: 'Estimation IA', unit: it.unit,
+        qty: it.qty, portion: null, per100: cleanNutri(it.per100), n: scaleNutri(it.per100, it.qty), t: now + i,
+      }));
+      entries.forEach((e) => day.entries.push(e));
+      save();
+      sheet.close();
+      render();
+      const total = sumNutri(entries);
+      const ids = entries.map((e) => e.id);
+      toast(`${entries.length} aliment${entries.length > 1 ? 's' : ''} ajouté${entries.length > 1 ? 's' : ''} à ${mealName(st.meal)} · ${fmt(total.kcal)} kcal`, {
+        action: 'Annuler',
+        onAction: () => { const d = state.days[key]; if (d) d.entries = d.entries.filter((x) => ids.indexOf(x.id) < 0); save(); render(); },
+      });
+      if (typeof opts.onAdded === 'function') opts.onAdded({ n: total, count: entries.length });
+    }
+
+    sheet.el.addEventListener('click', (ev) => {
+      const meal = pickMealChip(ev, sheet.body);
+      if (meal) { st.meal = meal; return; }
+      const b = ev.target.closest('[data-act]');
+      if (!b || b.disabled) return;
+      const act = b.dataset.act;
+      if (act === 'cam' || act === 'lib') {
+        const noteEl = $('[data-role="note"]', sheet.body);
+        if (noteEl) st.note = noteEl.value.trim();
+        $(`[data-role="${act}"]`, sheet.body).click();
+      } else if (act === 'analyze') analyze();
+      else if (act === 'cancel') { if (st.ctrl) st.ctrl.abort(); }
+      else if (act === 'add') addToJournal();
+      else if (act === 'again') { st.phase = 'pick'; st.result = null; st.image = null; draw(); }
+      else if (act === 'setup') { sheet.close(); openAiSetup(() => openPhotoAI(opts)); }
+    });
+    sheet.el.addEventListener('change', (ev) => {
+      const input = ev.target;
+      if (input.matches('[data-role="cam"], [data-role="lib"]')) { onFile(input); return; }
+      const row = input.closest('.ai-item');
+      if (row && input.matches('[data-role="on"]') && st.result) {
+        st.result.items[parseInt(row.dataset.i, 10)].on = input.checked;
+        row.classList.toggle('off', !input.checked);
+        $('[data-role="totals"]', sheet.body).innerHTML = totalsHTML();
+        const count = st.result.items.filter((it) => it.on && it.qty > 0).length;
+        const addBtn = $('[data-act="add"]', sheet.foot);
+        if (addBtn) { addBtn.disabled = !count; addBtn.textContent = `Ajouter ${count} aliment${count > 1 ? 's' : ''}`; }
+      }
+    });
+    sheet.el.addEventListener('input', (ev) => {
+      const input = ev.target;
+      const row = input.closest('.ai-item');
+      if (!row || !input.matches('[data-role="qty"]') || !st.result) return;
+      const it = st.result.items[parseInt(row.dataset.i, 10)];
+      const v = parseNum(input.value);
+      it.qty = isNum(v) && v > 0 && v <= 5000 ? v : 0;
+      input.classList.toggle('invalid', !(it.qty > 0));
+      const n = scaleNutri(it.per100, it.qty);
+      $('[data-role="meta"]', row).innerHTML = `${fmt(n.kcal)} kcal · P ${fmtG(n.prot)} · G ${fmtG(n.gluc)} · L ${fmtG(n.lip)}`;
+      $('[data-role="totals"]', sheet.body).innerHTML = totalsHTML();
+      const count = st.result.items.filter((x) => x.on && x.qty > 0).length;
+      const addBtn = $('[data-act="add"]', sheet.foot);
+      if (addBtn) { addBtn.disabled = !count; addBtn.textContent = `Ajouter ${count} aliment${count > 1 ? 's' : ''}`; }
+    });
+    draw();
+  }
+  ACTIONS['photo-ai'] = () => {
+    if (!state.profile) return;
+    if (ui.tab !== 'today') { ui.day = todayKey(); switchTab('today'); }
+    openPhotoAI({ meal: guessMeal() });
+  };
+
+  /* ===========================================================================
      10. SAUVEGARDE (JSON, CSV), RÉINITIALISATION, SERVICE WORKER, DÉMARRAGE
      ========================================================================= */
 
@@ -4191,7 +4771,7 @@
       if (!ok1) return;
       confirmDialog({ title: 'Vraiment tout effacer ?', message: 'Action irréversible. Exporte une sauvegarde avant si tu veux garder tes données.', ok: 'Tout effacer', danger: true }).then((ok2) => {
         if (!ok2) return;
-        try { localStorage.removeItem(STORAGE_KEY); } catch (e) { /* ignore */ }
+        try { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(AI_STORAGE_KEY); } catch (e) { /* ignore */ }
         state = defaultState();
         bootWarning = '';
         Object.assign(ui, { tab: 'today', day: todayKey(), onbDraft: null, onbResult: false, foodsFilter: 'all', foodsQuery: '' });

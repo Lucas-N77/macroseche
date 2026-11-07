@@ -6,7 +6,7 @@
    (v1 → v2 → v3…). C'est ce qui déclenche la bannière « Nouvelle version
    disponible – Recharger » sur ton iPhone.
    ============================================================================= */
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 
 const CACHE_PREFIX = 'macroseche-';
 const APP_CACHE = `${CACHE_PREFIX}app-${CACHE_VERSION}`;
